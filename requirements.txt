@@ -1,10 +1,20 @@
+# PyTorch for CUDA 12.1 (이 부분은 사용자의 CUDA 버전에 맞게 수정해야 함)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision
+torchaudio
+
+# FastAPI & Streamlit (Web App)
 fastapi
 uvicorn[standard]
 jinja2
 streamlit
 
+# Transformers & Donut (AI Models)
 transformers
+donut-python
 
+# LangChain & VectorDB
 langchain
 langchain-core
 langchain-openai
@@ -14,22 +24,29 @@ langchain-text-splitters
 tiktoken
 chromadb
 
+# Document Parsers
 unstructured
 unstructured[docx]
 unstructured[xlsx]
+python-pptx
 python-docx
-olefile
 pyhwp
 PyMuPDF
 olefile
+openpyxl
+openpyxl-image-loader
 
+# Image Handling
 Pillow
 
+# Environment & Utilities
 python-dotenv
 
+# Web Crawling
 beautifulsoup4
 selenium
 webdriver-manager
 requests
 
+# Scheduler
 APScheduler

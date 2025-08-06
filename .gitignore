@@ -96,3 +96,4 @@ config.ini
 api_keys.py
 
 crawled_data/
+logs/

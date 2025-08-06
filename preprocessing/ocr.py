@@ -1,69 +1,82 @@
 # preprocessing/ocr.py
 
-import os
-import json
-import time
-import uuid
-import requests
-from dotenv import load_dotenv
+import torch
+import logging
+import re
+from PIL import Image
+from transformers import DonutProcessor, VisionEncoderDecoderModel
+import io
 
-load_dotenv()
+log = logging.getLogger(__name__)
 
-# --- 환경 변수 로드 ---
-CLOVA_OCR_API_URL = os.getenv("CLOVA_OCR_API_URL")
-CLOVA_OCR_SECRET_KEY = os.getenv("CLOVA_OCR_SECRET_KEY")
+# --- Donut 모델 전역 변수 (효율적인 로딩을 위해) ---
+DONUT_PROCESSOR = None
+DONUT_MODEL = None
+DEVICE = None
 
-def get_text_from_image(image_bytes: bytes, file_format: str = 'png') -> str:
+def _initialize_donut():
     """
-    네이버 클로바 OCR API를 사용하여 이미지 바이트에서 텍스트를 추출합니다.
-
-    Args:
-        image_bytes (bytes): 텍스트를 추출할 이미지의 바이트 데이터.
-        file_format (str): 이미지 파일 형식 (예: 'png', 'jpeg').
-
-    Returns:
-        str: 추출된 텍스트. API 호출 실패 시 빈 문자열을 반환합니다.
+    Donut 모델과 프로세서를 초기화하고 전역 변수에 할당합니다.
+    이미 로드된 경우 이 과정을 건너뜁니다.
     """
-    if not all([CLOVA_OCR_API_URL, CLOVA_OCR_SECRET_KEY]):
-        print("OCR API 환경 변수가 설정되지 않았습니다.")
-        return ""
-
-    request_json = {
-        'images': [
-            {
-                'format': file_format,
-                'name': 'demo'
-            }
-        ],
-        'requestId': str(uuid.uuid4()),
-        'version': 'V2',
-        'timestamp': int(round(time.time() * 1000))
-    }
-
-    payload = {'message': json.dumps(request_json).encode('UTF-8')}
-    files = [
-        ('file', image_bytes)
-    ]
-    headers = {
-        'X-OCR-SECRET': CLOVA_OCR_SECRET_KEY
-    }
+    global DONUT_PROCESSOR, DONUT_MODEL, DEVICE
+    
+    if DONUT_MODEL is not None:
+        return
 
     try:
-        response = requests.post(CLOVA_OCR_API_URL, headers=headers, data=payload, files=files, timeout=30)
-        response.raise_for_status()  # 200 이외의 응답 코드에 대해 예외 발생
+        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        model_name = "naver-clova-ix/donut-base"
         
-        result = response.json()
+        log.info(f"Donut 모델을 처음으로 로드합니다. 장치: {DEVICE}")
         
-        # 추출된 텍스트들을 하나의 문자열로 결합
-        full_text = []
-        for field in result['images'][0]['fields']:
-            full_text.append(field['inferText'])
+        DONUT_PROCESSOR = DonutProcessor.from_pretrained(model_name)
+        DONUT_MODEL = VisionEncoderDecoderModel.from_pretrained(model_name)
         
-        return " ".join(full_text)
-
-    except requests.exceptions.RequestException as e:
-        print(f"OCR API 요청 실패: {e}")
-        return ""
+        DONUT_MODEL.to(DEVICE)
+        DONUT_MODEL.eval()
+        log.info("Donut 모델 로드 및 설정 완료.")
+    
     except Exception as e:
-        print(f"OCR 처리 중 에러 발생: {e}")
+        log.error("Donut 모델 로딩에 실패했습니다. PyTorch 및 의존성 라이브러리 설치를 확인하세요.", exc_info=True)
+        DONUT_PROCESSOR, DONUT_MODEL = None, None
+
+def get_text_from_donut(image_bytes: bytes) -> str:
+    """
+    Donut 모델을 사용하여 이미지 바이트에서 텍스트를 추출합니다.
+    """
+    _initialize_donut()
+
+    if not all([DONUT_PROCESSOR, DONUT_MODEL]):
+        log.warning("Donut 모델이 사용 불가능한 상태입니다. 텍스트 추출을 건너뜁니다.")
+        return ""
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        
+        pixel_values = DONUT_PROCESSOR(image, return_tensors="pt").pixel_values
+        task_prompt = "<s_iitcdip>"
+        decoder_input_ids = DONUT_PROCESSOR.tokenizer(task_prompt, add_special_tokens=False, return_tensors="pt").input_ids
+
+        with torch.no_grad():
+            outputs = DONUT_MODEL.generate(
+                pixel_values.to(DEVICE),
+                decoder_input_ids=decoder_input_ids.to(DEVICE),
+                max_length=DONUT_MODEL.decoder.config.max_position_embeddings,
+                pad_token_id=DONUT_PROCESSOR.tokenizer.pad_token_id,
+                eos_token_id=DONUT_PROCESSOR.tokenizer.eos_token_id,
+                use_cache=True,
+                bad_words_ids=[[DONUT_PROCESSOR.tokenizer.unk_token_id]],
+                return_dict_in_generate=True,
+            )
+
+        sequence = DONUT_PROCESSOR.batch_decode(outputs.sequences)[0]
+        sequence = sequence.replace(DONUT_PROCESSOR.tokenizer.eos_token, "").replace(DONUT_PROCESSOR.tokenizer.pad_token, "")
+        result_text = re.sub(r"<.*?>", "", sequence).strip()
+
+        log.info(f"Donut으로 텍스트 추출 성공. (길이: {len(result_text)})")
+        return result_text
+
+    except Exception as e:
+        log.error("Donut 추론 중 오류 발생", exc_info=True)
         return ""
