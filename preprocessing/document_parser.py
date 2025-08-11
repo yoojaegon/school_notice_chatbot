@@ -2,8 +2,8 @@
 
 import os
 import logging
+import subprocess
 from typing import Dict, List, Union, Tuple
-import hwp5
 import fitz  # PyMuPDF
 import docx
 import olefile
@@ -69,19 +69,50 @@ def _parse_docx(file_path: str) -> Dict[str, Union[str, List[Tuple[int, bytes]]]
         return {"text": "", "images": []}
     
 def _parse_hwp(file_path: str) -> Dict[str, Union[str, List[Tuple[int, bytes]]]]:
+    full_text = ""
+    images = []
+    file_name = os.path.basename(file_path)
+
     try:
-        hwp_file = hwp5.HWPReader(file_path)
-        full_text = hwp_file.get_text()
-        images = []
+        # --- 1. 텍스트 추출 (subprocess 사용) ---
+        log.info(f"hwp5txt 명령어를 사용하여 텍스트 추출 시도: {file_name}")
+        # hwp5txt <파일경로> 명령을 실행하고, 결과를 stdout으로 받음
+        result = subprocess.run(
+            ['hwp5txt', file_path],
+            capture_output=True,  # 표준 출력/오류를 캡처
+            text=True,            # 출력을 텍스트(문자열)로 디코딩
+            check=True,           # 반환 코드가 0이 아니면 예외 발생
+            encoding='utf-8'      # 인코딩 명시
+        )
+        full_text = result.stdout
+        log.info(f"hwp5txt 텍스트 추출 성공.")
+
+    except FileNotFoundError:
+        log.error("'hwp5txt' 명령어를 찾을 수 없습니다. 'pip install pyhwp'가 올바르게 설치되었는지 확인해주세요.")
+        # 텍스트 추출에 실패해도 이미지 추출은 시도하도록 넘어감
+    except subprocess.CalledProcessError as e:
+        log.error(f"hwp5txt 명령어 실행 중 오류 발생: {file_name}\nError: {e.stderr}")
+        # 텍스트 추출에 실패해도 이미지 추출은 시도하도록 넘어감
+    except Exception as e:
+        log.error(f"HWP 텍스트 추출 중 예상치 못한 오류 발생: {file_name}", exc_info=True)
+
+    try:
+        # --- 2. 이미지 추출 (olefile 사용) ---
+        log.info(f"olefile을 사용하여 이미지 추출 시도: {file_name}")
         with olefile.OleFileIO(file_path) as ole:
             for stream_path in ole.listdir():
-                if stream_path[0] == 'Pictures':
+                # HWP 이미지는 'Pictures' 스트림 디렉토리 아래에 저장됨
+                if stream_path and stream_path[0] == 'Pictures':
                     image_data = ole.openstream(stream_path).read()
                     images.append((len(images) + 1, image_data))
-        return {"text": full_text, "images": images}
+        if images:
+            log.info(f"{len(images)}개의 이미지 추출 성공.")
+    
     except Exception as e:
-        log.error(f"HWP 파일 처리 중 오류 발생: {os.path.basename(file_path)}", exc_info=True)
-        return {"text": "", "images": []}
+        # olefile 라이브러리가 파일을 열 수 없는 경우 (예: 파일 손상)
+        log.error(f"HWP에서 olefile로 이미지 추출 중 오류 발생: {file_name}", exc_info=True)
+
+    return {"text": full_text, "images": images}
 
 def _parse_pptx(file_path: str) -> Dict[str, Union[str, List[Tuple[int, bytes]]]]:
     try:

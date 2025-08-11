@@ -97,3 +97,4 @@ api_keys.py
 
 crawled_data/
 logs/
+extract_data/
