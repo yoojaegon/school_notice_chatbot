@@ -23,7 +23,7 @@ def test_donut_base_model(image_path: str):
         print(f"[{device.upper()}] 장치를 사용하여 모델을 로드합니다...")
         
         # 범용 'donut-base' 모델과 프로세서 로드
-        model_name = "naver-clova-ix/donut-base"
+        model_name = "naver-clova-ix/donut-base-finetuned-cord-v2"
         processor = DonutProcessor.from_pretrained(model_name)
         model = VisionEncoderDecoderModel.from_pretrained(model_name)
 

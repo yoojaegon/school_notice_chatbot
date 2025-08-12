@@ -1,167 +1,155 @@
-import os
-import logging
-from typing import List, Dict, Any
-from pathlib import Path
-import zipfile
-import shutil
-import io
-from PIL import Image
+# preprocessing/handler.py
 
-from . import document_parser, ocr, chunker
+import os
+import io
+import logging
+from typing import List, Dict
+from . import ocr
+from .document_parser import parse_document  # 기존 파서 사용 (HWP/PDF/DOCX 등)
 
 log = logging.getLogger(__name__)
 
-# 지원하는 파일 형식 정의
+DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".hwp", ".pptx", ".xlsx", ".txt"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
-DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".hwp", ".pptx", ".xlsx"}
-ARCHIVE_EXTENSIONS = {".zip"}
+ARCHIVE_EXTENSIONS = {".zip"}  # zip은 indexer에서 풀어 처리
 
-# 추출 결과 로컬 저장 기본 경로
-SAVE_EXTRACT_DIR = Path("extract_data")
+def _simple_chunks(text: str, max_len: int = 1000) -> List[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_len, n)
+        chunks.append(text[start:end])
+        start = end
+    return chunks
 
-def _save_image_bytes_as_png(image_bytes: bytes, save_path: Path) -> Path:
-    """이미지 바이트를 PNG로 변환하여 save_path에 저장합니다. 실패 시 raw 바이트를 저장합니다."""
+def _base_metadata(file_path: str) -> Dict:
+    return {
+        "source": os.path.basename(file_path),
+        "category": None,
+    }
+
+def process_file(file_path: str) -> List[Dict]:
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(save_path, format="PNG")
-        return save_path
-    except Exception:
-        # PIL 로드 실패 시 원본 바이트를 .bin으로 저장
-        fallback = save_path.with_suffix(".bin")
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        with open(fallback, "wb") as f:
-            f.write(image_bytes)
-        return fallback
+        ext = os.path.splitext(file_path)[1].lower()
+        filename = os.path.basename(file_path)
+        parent_dir = os.path.basename(os.path.dirname(file_path))
+        is_content_txt = (filename == "content.txt")
 
-def _handle_zip_file(file_path: Path) -> List[Dict[str, Any]]:
-    """
-    ZIP 파일의 압축을 풀고 내부의 각 파일을 개별적으로 처리하여 청크 리스트를 반환합니다.
-    """
-    log.info(f"ZIP 아카이브 처리 시작: {file_path.name}")
-    all_chunks = []
-    
-    extract_dir = file_path.parent / f".{file_path.stem}_unzipped_temp"
-    
-    try:
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir)
-        extract_dir.mkdir(exist_ok=True)
+        results: List[Dict] = []
 
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
-        
-        log.info(f"'{extract_dir.name}'에 압축 해제 완료. 내부 파일들을 처리합니다.")
-        
-        for root, _, files in os.walk(extract_dir):
-            for name in files:
-                extracted_file_path = os.path.join(root, name)
-                chunks_from_file = process_file(extracted_file_path)
-                if chunks_from_file:
-                    all_chunks.extend(chunks_from_file)
+        # 1) 게시글 본문
+        if is_content_txt:
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    body = f.read()
+            except UnicodeDecodeError:
+                with open(file_path, "r", encoding="cp949") as f:
+                    body = f.read()
 
-    except zipfile.BadZipFile:
-        log.error(f"손상되었거나 유효하지 않은 ZIP 파일입니다: {file_path.name}")
-    except Exception as e:
-        log.error(f"ZIP 파일 처리 중 오류 발생: {file_path.name}", exc_info=True)
-    finally:
-        # 임시 디렉토리 정리
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir)
-            log.info(f"임시 압축해제 폴더를 삭제했습니다: {extract_dir.name}")
-            
-    return all_chunks
+            for i, ch in enumerate(_simple_chunks(body)):
+                md = _base_metadata(file_path)
+                md.update({
+                    "category": "post_body",
+                    "attachment_filename": None,
+                    "attachment_ext": None,
+                    "chunk_index": i,
+                })
+                results.append({"page_content": ch, "metadata": md})
+            return results
 
-def process_file(file_path: str) -> List[Dict[str, Any]]:
-    """
-    단일 파일을 처리하여 메타데이터가 포함된 텍스트 청크 리스트를 생성합니다.
-    """
-    p_file_path = Path(file_path)
-    if not p_file_path.is_file():
+        # 2) 첨부가 이미지 자체인 경우 → OCR
+        if ext in IMAGE_EXTENSIONS:
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+            text = ocr.get_text_from_donut(img_bytes) or ""
+            for i, ch in enumerate(_simple_chunks(text)):
+                md = _base_metadata(file_path)
+                md.update({
+                    "category": "attachment_body",
+                    "attachment_filename": filename,
+                    "attachment_ext": ext,
+                    "image_index": 0,
+                    "ocr_model": "donut-base",
+                    "chunk_index": i,
+                })
+                results.append({"page_content": ch, "metadata": md})
+            return results
+
+        # 3) 문서형 첨부 (HWP/PDF/DOCX/TXT 등)
+        if ext in DOCUMENT_EXTENSIONS:
+            if ext == ".txt":
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        body = f.read()
+                except UnicodeDecodeError:
+                    with open(file_path, "r", encoding="cp949") as f:
+                        body = f.read()
+
+                for i, ch in enumerate(_simple_chunks(body)):
+                    md = _base_metadata(file_path)
+                    md.update({
+                        "category": "attachment_body",
+                        "attachment_filename": filename,
+                        "attachment_ext": ext,
+                        "chunk_index": i,
+                    })
+                    results.append({"page_content": ch, "metadata": md})
+                return results
+
+            parsed = parse_document(file_path) or {}
+            body_text = (parsed.get("text") or "").strip()
+            embedded_images = parsed.get("images") or []  # [(index, bytes)] 또는 [bytes]
+
+            # 3-1) 첨부파일 본문
+            if body_text:
+                for i, ch in enumerate(_simple_chunks(body_text)):
+                    md = _base_metadata(file_path)
+                    md.update({
+                        "category": "attachment_body",
+                        "attachment_filename": filename,
+                        "attachment_ext": ext,
+                        "chunk_index": i,
+                    })
+                    results.append({"page_content": ch, "metadata": md})
+
+            # 3-2) 문서에 포함된 이미지 OCR (tuple 안전 언패킹)
+            for img_idx, img in enumerate(embedded_images):
+                # img가 (index, bytes) 이거나 bytes일 수 있음
+                if isinstance(img, tuple):
+                    # (idx, bytes) 형태 보장
+                    _, img_bytes = img if len(img) >= 2 else (None, None)
+                else:
+                    img_bytes = img
+
+                if not img_bytes:
+                    continue
+
+                text = ocr.get_text_from_donut(img_bytes) or ""
+                if not text.strip():
+                    continue
+
+                for i, ch in enumerate(_simple_chunks(text)):
+                    md = _base_metadata(file_path)
+                    md.update({
+                        "category": "embedded_image_ocr",
+                        "attachment_filename": filename,
+                        "attachment_ext": ext,
+                        "image_index": img_idx,
+                        "ocr_model": "donut-base",
+                        "chunk_index": i,
+                    })
+                    results.append({"page_content": ch, "metadata": md})
+
+            return results
+
+        # 4) 기타 확장자
+        log.warning(f"지원하지 않는 파일 형식, 건너뜁니다: {filename}")
         return []
 
-    file_name = p_file_path.name
-    extension = p_file_path.suffix.lower()
-    all_chunks = []
-    log.info(f"파일 처리 시작: {file_name}")
-
-    if extension in ARCHIVE_EXTENSIONS:
-        return _handle_zip_file(p_file_path)
-
-    elif extension in IMAGE_EXTENSIONS:
-        try:
-            with open(file_path, 'rb') as f:
-                image_bytes = f.read()
-
-            # 저장 폴더: 파일명(stem) 기준
-            img_folder = SAVE_EXTRACT_DIR / Path(file_name).stem
-            img_folder.mkdir(parents=True, exist_ok=True)
-
-            # 1) 원본 이미지 저장 (PNG 변환)
-            _save_image_bytes_as_png(image_bytes, img_folder / "original.png" )
-
-            # 2) OCR 텍스트 추출 및 저장
-            extracted_text = ocr.get_text_from_donut(image_bytes)
-            if extracted_text:
-                (img_folder / "ocr.txt").write_text(extracted_text, encoding="utf-8")
-
-            # 3) DB 저장용 청크 생성
-            text_chunks = chunker.chunk_text(extracted_text)
-            for i, chunk in enumerate(text_chunks):
-                metadata = {"source": file_name, "type": "image_content", "chunk_index": i + 1}
-                all_chunks.append({"page_content": chunk, "metadata": metadata})
-        except Exception as e:
-            log.error(f"이미지 파일 처리 중 오류 발생: {file_name}", exc_info=True)
-
-    elif extension in DOCUMENT_EXTENSIONS:
-        parsed_data = document_parser.parse_document(file_path)
-        
-        body_text = parsed_data.get("text", "")
-        if body_text:
-            # 게시글별 저장 폴더 (상위 폴더명이 1065997_제목 형태)
-            post_folder = SAVE_EXTRACT_DIR / Path(file_path).parent.name
-            post_folder.mkdir(parents=True, exist_ok=True)
-
-            # 1) 본문 텍스트 저장
-            try:
-                (post_folder / "body.txt").write_text(body_text, encoding="utf-8")
-            except Exception:
-                pass
-
-            # 2) 청크 생성 및 수집
-            body_chunks = chunker.chunk_text(body_text)
-            for i, chunk in enumerate(body_chunks):
-                metadata = {"source": file_name, "type": "document_body", "chunk_index": i + 1}
-                all_chunks.append({"page_content": chunk, "metadata": metadata})
-            
-        embedded_images = parsed_data.get("images", [])
-        if embedded_images:
-            log.info(f"{file_name}에서 {len(embedded_images)}개의 내장 이미지를 처리합니다.")
-            # 게시글별 저장 폴더
-            post_folder = SAVE_EXTRACT_DIR / Path(file_path).parent.name
-            post_folder.mkdir(parents=True, exist_ok=True)
-            for img_index, image_bytes in embedded_images:
-                # 1) 원본 이미지 저장 (PNG 변환 시도)
-                img_png_path = post_folder / f"image_{img_index}.png"
-                _save_image_bytes_as_png(image_bytes, img_png_path)
-
-                # 2) OCR 텍스트 추출 및 저장
-                img_text = ocr.get_text_from_donut(image_bytes)
-                if img_text:
-                    try:
-                        (post_folder / f"image_{img_index}.txt").write_text(img_text, encoding="utf-8")
-                    except Exception:
-                        pass
-
-                    # 3) DB 저장용 청크 생성
-                    img_chunks = chunker.chunk_text(img_text)
-                    for i, chunk in enumerate(img_chunks):
-                        metadata = {"source": file_name, "type": "embedded_image", "image_index": img_index, "chunk_index": i + 1}
-                        all_chunks.append({"page_content": chunk, "metadata": metadata})
-    else:
-        # 임시폴더 내 시스템 파일(예: .DS_Store) 등을 무시하기 위해 debug 레벨로 변경
-        if not file_name.startswith('.'):
-            log.warning(f"지원하지 않는 파일 형식, 건너뜁니다: {file_name}")
-
-    log.info(f"파일 처리 완료: {file_name}, 총 {len(all_chunks)}개의 청크 생성.")
-    return all_chunks
+    except Exception:
+        log.error(f"파일 처리 중 오류: {file_path}", exc_info=True)
+        return []

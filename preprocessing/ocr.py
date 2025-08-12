@@ -1,82 +1,63 @@
 # preprocessing/ocr.py
 
-import torch
+import io
 import logging
-import re
 from PIL import Image
 from transformers import DonutProcessor, VisionEncoderDecoderModel
-import io
+import torch
 
 log = logging.getLogger(__name__)
 
-# --- Donut 모델 전역 변수 (효율적인 로딩을 위해) ---
-DONUT_PROCESSOR = None
-DONUT_MODEL = None
-DEVICE = None
-
-def _initialize_donut():
-    """
-    Donut 모델과 프로세서를 초기화하고 전역 변수에 할당합니다.
-    이미 로드된 경우 이 과정을 건너뜁니다.
-    """
-    global DONUT_PROCESSOR, DONUT_MODEL, DEVICE
-    
-    if DONUT_MODEL is not None:
-        return
-
-    try:
-        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-        model_name = "naver-clova-ix/donut-base"
-        
-        log.info(f"Donut 모델을 처음으로 로드합니다. 장치: {DEVICE}")
-        
-        DONUT_PROCESSOR = DonutProcessor.from_pretrained(model_name)
-        DONUT_MODEL = VisionEncoderDecoderModel.from_pretrained(model_name)
-        
-        DONUT_MODEL.to(DEVICE)
-        DONUT_MODEL.eval()
-        log.info("Donut 모델 로드 및 설정 완료.")
-    
-    except Exception as e:
-        log.error("Donut 모델 로딩에 실패했습니다. PyTorch 및 의존성 라이브러리 설치를 확인하세요.", exc_info=True)
-        DONUT_PROCESSOR, DONUT_MODEL = None, None
+# Donut 모델과 프로세서 로드
+DONUT_MODEL_NAME = "naver-clova-ix/donut-base-finetuned-cord-v2"
+DONUT_PROCESSOR = DonutProcessor.from_pretrained(DONUT_MODEL_NAME)
+DONUT_MODEL = VisionEncoderDecoderModel.from_pretrained(DONUT_MODEL_NAME)
+DONUT_MODEL.eval()
 
 def get_text_from_donut(image_bytes: bytes) -> str:
     """
-    Donut 모델을 사용하여 이미지 바이트에서 텍스트를 추출합니다.
+    Donut 모델을 사용하여 이미지에서 텍스트를 추출합니다.
+    Args:
+        image_bytes (bytes): 이미지 파일의 바이트 데이터
+    Returns:
+        str: 추출된 텍스트
     """
-    _initialize_donut()
-
-    if not all([DONUT_PROCESSOR, DONUT_MODEL]):
-        log.warning("Donut 모델이 사용 불가능한 상태입니다. 텍스트 추출을 건너뜁니다.")
-        return ""
-
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        
-        pixel_values = DONUT_PROCESSOR(image, return_tensors="pt").pixel_values
-        task_prompt = "<s_iitcdip>"
-        decoder_input_ids = DONUT_PROCESSOR.tokenizer(task_prompt, add_special_tokens=False, return_tensors="pt").input_ids
+
+        # 이미지 크기가 0이 아닌지 확인
+        if image.width == 0 or image.height == 0:
+            log.warning("이미지 크기가 0입니다. OCR을 건너뜁니다.")
+            return ""
+
+        # 채널 형식 명확히 지정
+        pixel_values = DONUT_PROCESSOR(
+            image,
+            return_tensors="pt",
+            input_data_format="channels_last"
+        ).pixel_values
+
+        decoder_input_ids = DONUT_PROCESSOR.tokenizer(
+            "<s_cord-v2>",
+            add_special_tokens=False,
+            return_tensors="pt"
+        ).input_ids
 
         with torch.no_grad():
             outputs = DONUT_MODEL.generate(
-                pixel_values.to(DEVICE),
-                decoder_input_ids=decoder_input_ids.to(DEVICE),
-                max_length=DONUT_MODEL.decoder.config.max_position_embeddings,
+                pixel_values,
+                decoder_input_ids=decoder_input_ids,
+                max_length=512,
                 pad_token_id=DONUT_PROCESSOR.tokenizer.pad_token_id,
-                eos_token_id=DONUT_PROCESSOR.tokenizer.eos_token_id,
-                use_cache=True,
-                bad_words_ids=[[DONUT_PROCESSOR.tokenizer.unk_token_id]],
-                return_dict_in_generate=True,
+                eos_token_id=DONUT_PROCESSOR.tokenizer.eos_token_id
             )
 
-        sequence = DONUT_PROCESSOR.batch_decode(outputs.sequences)[0]
-        sequence = sequence.replace(DONUT_PROCESSOR.tokenizer.eos_token, "").replace(DONUT_PROCESSOR.tokenizer.pad_token, "")
-        result_text = re.sub(r"<.*?>", "", sequence).strip()
+        sequence = DONUT_PROCESSOR.batch_decode(outputs, skip_special_tokens=True)[0]
+        text = sequence.replace(DONUT_PROCESSOR.tokenizer.eos_token, "").strip()
 
-        log.info(f"Donut으로 텍스트 추출 성공. (길이: {len(result_text)})")
-        return result_text
+        log.info(f"Donut으로 텍스트 추출 성공 (길이: {len(text)})")
+        return text
 
-    except Exception as e:
+    except Exception:
         log.error("Donut 추론 중 오류 발생", exc_info=True)
         return ""
