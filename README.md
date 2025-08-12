@@ -97,19 +97,19 @@
 
 **`.env` 파일:**
 ```
-# 크롤링할 학교 공지사항 게시판 URL 목록
-# 형식: "게시판이름1|URL1,게시판이름2|URL2"
-# 예시: SCHOOL_ANNOUNCEMENT_URLS="학사공지|https://.../notice,장학공지|https://.../scholarship"
+##크롤링할 학교 공지사항 게시판 URL 목록
+##형식: "게시판이름1|URL1,게시판이름2|URL2"
+##예시: SCHOOL_ANNOUNCEMENT_URLS="학사공지|https://.../notice,장학공지|https://.../scholarship"
 SCHOOL_ANNOUNCEMENT_URLS="공지사항|https://www.your-school.ac.kr/community/notice"
 
-# OpenAI API (임베딩 및 답변 생성용)
+##OpenAI API (임베딩 및 답변 생성용)
 OPENAI_API_KEY=sk-...
 
-# (선택) 크롤링 수집 연도 설정 (기본값: 작년)
-# 예: 2023으로 설정 시, 2023년 1월 1일 이전 게시물은 수집하지 않음
+##(선택) 크롤링 수집 연도 설정 (기본값: 작년)
+##예: 2023으로 설정 시, 2023년 1월 1일 이전 게시물은 수집하지 않음
 TARGET_YEAR=2023
 
-# (선택) 추출된 텍스트를 별도 디렉토리에 저장할지 여부 (디버깅용)
+##(선택) 추출된 텍스트를 별도 디렉토리에 저장할지 여부 (디버깅용)
 SAVE_EXTRACTED_TEXT=true
 ```
 
