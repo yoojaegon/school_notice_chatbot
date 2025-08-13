@@ -65,7 +65,7 @@ def process_file(file_path: str) -> List[Dict]:
         if ext in IMAGE_EXTENSIONS:
             with open(file_path, "rb") as f:
                 img_bytes = f.read()
-            text = ocr.get_text_from_donut(img_bytes) or ""
+            text = ocr.get_text_from_clova_ocr(img_bytes) or ""
             for i, ch in enumerate(_simple_chunks(text)):
                 md = _base_metadata(file_path)
                 md.update({
@@ -73,7 +73,7 @@ def process_file(file_path: str) -> List[Dict]:
                     "attachment_filename": filename,
                     "attachment_ext": ext,
                     "image_index": 0,
-                    "ocr_model": "donut-base",
+                    "ocr_model": "clova-ocr",
                     "chunk_index": i,
                 })
                 results.append({"page_content": ch, "metadata": md})
@@ -128,7 +128,7 @@ def process_file(file_path: str) -> List[Dict]:
                 if not img_bytes:
                     continue
 
-                text = ocr.get_text_from_donut(img_bytes) or ""
+                text = ocr.get_text_from_clova_ocr(img_bytes) or ""
                 if not text.strip():
                     continue
 
@@ -139,7 +139,7 @@ def process_file(file_path: str) -> List[Dict]:
                         "attachment_filename": filename,
                         "attachment_ext": ext,
                         "image_index": img_idx,
-                        "ocr_model": "donut-base",
+                        "ocr_model": "clova-ocr",
                         "chunk_index": i,
                     })
                     results.append({"page_content": ch, "metadata": md})
