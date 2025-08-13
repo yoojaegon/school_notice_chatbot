@@ -98,3 +98,4 @@ api_keys.py
 crawled_data/
 logs/
 extracted_data/
+cache/
