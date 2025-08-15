@@ -270,7 +270,6 @@ def main():
         log.info(f"추출 텍스트는 '{EXTRACTED_SAVE_DIR}' 폴더에 저장되었습니다.")
     log.info("=" * 50)
 
-
 if __name__ == "__main__":
     setup_logging()
     main()
