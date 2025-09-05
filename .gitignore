@@ -95,7 +95,7 @@ secrets.toml
 config.ini
 api_keys.py
 
-crawled_data/
+# crawled_data/
 logs/
 extracted_data/
 cache/
