@@ -58,6 +58,7 @@ output/
 # Hugging Face cache
 .cache/
 huggingface/
+cache/
 
 # Vector DB storage
 chroma_db/
@@ -98,4 +99,3 @@ api_keys.py
 crawled_data/
 logs/
 extracted_data/
-cache
