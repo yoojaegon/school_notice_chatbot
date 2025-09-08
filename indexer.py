@@ -6,6 +6,9 @@ import logging.handlers
 import datetime
 from typing import List, Dict, Any, Sequence
 import time
+import pickle
+from rank_bm25 import BM25Okapi
+from konlpy.tag import Okt
 
 import chromadb
 from dotenv import load_dotenv
@@ -70,6 +73,7 @@ load_dotenv()
 CRAWLED_DATA_DIR = "./crawled_data"
 CHROMA_DB_DIR = "./chroma_db"
 COLLECTION_NAME = "school_announcements"
+BM25_INDEX_PATH = os.path.join(CHROMA_DB_DIR, "bm25_index.pkl")
 
 EXTRACTED_SAVE_DIR = os.getenv("EXTRACTED_SAVE_DIR", "./extracted_data")
 SAVE_EXTRACTED_TEXT = os.getenv("SAVE_EXTRACTED_TEXT", "true").lower() in ("1", "true", "yes", "y")
@@ -262,6 +266,41 @@ def main():
             _save_chunks_to_disk(post_id, file_path, structured_chunks)
         except Exception:
             log.error("디스크 저장 호출 중 오류", exc_info=True)
+
+    # ---- 4) BM25 인덱스 생성 ----
+    log.info("=" * 50)
+    log.info("BM25 인덱스 생성을 시작합니다.")
+    try:
+        # ChromaDB에서 모든 문서 가져오기
+        log.info(f"'{COLLECTION_NAME}' 컬렉션에서 모든 문서를 로드합니다...")
+        all_data = collection.get(include=["documents"])
+        doc_ids = all_data['ids']
+        documents = all_data['documents']
+
+        if not documents:
+            log.warning("BM25 인덱스를 생성할 문서가 없습니다. 이 단계를 건너뜁니다.")
+        else:
+            log.info(f"총 {len(documents)}개의 문서를 기반으로 BM25 인덱스를 빌드합니다.")
+            
+            # KoNLPy Okt를 사용한 형태소 분석 (토큰화)
+            log.info("KoNLPy Okt를 사용하여 형태소 분석을 시작합니다. (시간이 소요될 수 있습니다)")
+            okt = Okt()
+            
+            # stem=True: '했습니다' -> '하다'와 같이 어간을 추출하여 검색 성능 향상
+            # 불용어(stopword) 처리: 한 글자짜리 토큰은 대부분 조사, 어미이므로 제거
+            tokenized_corpus = []
+            for doc in tqdm(documents, desc="BM25 토큰화 중"):
+                tokens = okt.morphs(doc, stem=True)
+                tokenized_corpus.append([token for token in tokens if len(token) > 1])
+
+            bm25 = BM25Okapi(tokenized_corpus)
+
+            # BM25 인덱스와 문서 ID 목록을 저장
+            with open(BM25_INDEX_PATH, 'wb') as f:
+                pickle.dump({'bm25': bm25, 'doc_ids': doc_ids}, f)
+            log.info(f"✅ BM25 인덱스를 성공적으로 생성하고 '{BM25_INDEX_PATH}'에 저장했습니다.")
+    except Exception:
+        log.error("❌ BM25 인덱스 생성 중 오류 발생", exc_info=True)
 
     log.info("=" * 50)
     log.info("모든 파일의 색인 작업이 완료되었습니다.")
